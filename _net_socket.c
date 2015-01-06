@@ -11,7 +11,6 @@
 #include <arpa/inet.h>
 #include <pthread.h>
 
-#include "net_socket.h"
 #include "_net_poll.h"
 #include "_net_socket.h"
 

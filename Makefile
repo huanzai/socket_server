@@ -1,6 +1,6 @@
 all : server client client2
 
-server : main.c net_socket.c net_poll.c
+server : main.c _net_socket.c _net_poll.c
 	gcc -g -Wall -o $@ $^ -lpthread
 
 client : client.c
