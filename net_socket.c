@@ -304,8 +304,8 @@ _server_delfd(struct socket_server *ss, struct socket *s) {
 }
 
 int
-do_cmd_accept(struct socket_server *ss, struct socket_cmd_accept *cmd) {
-	printf("do_cmd_accept port:%d\n", cmd->port);	
+do_cmd_listen(struct socket_server *ss, struct socket_cmd_accept *cmd) {
+	printf("do_cmd_listen port:%d\n", cmd->port);	
 
 	int r, sockfd;
 	sockfd = socket(AF_INET, SOCK_STREAM, 0);
@@ -320,7 +320,7 @@ do_cmd_accept(struct socket_server *ss, struct socket_cmd_accept *cmd) {
 	r = bind(sockfd, (struct sockaddr*)&addr, sizeof(addr));
 	if (r == -1) {
 		perror("bind");
-		return -1;
+		goto done;
 	}
 
 	set_nonblock(sockfd);
@@ -328,9 +328,13 @@ do_cmd_accept(struct socket_server *ss, struct socket_cmd_accept *cmd) {
 	r = listen(sockfd, 10);
 	if (r == -1) {
 		perror("listen");
-		return -1;
+		goto done;
 	}
-	return _server_addfd(ss, sockfd, SOCKET_TYPE_ACCEPT);
+	r = _server_addfd(ss, sockfd, SOCKET_TYPE_ACCEPT);
+
+done:
+	free(cmd);
+	return r;
 }
 
 struct socket_cmd_connect {
@@ -365,7 +369,7 @@ _connect(void *p) {
 	addr.sin_port   = htons(cmd->port);
 	r = inet_pton(AF_INET, cmd->ip, &addr.sin_addr);
 	if (r == 0) {
-		printf("%s is not corrent\n", cmd->ip);
+		printf("%s is not correct\n", cmd->ip);
 		goto done;
 	} else if (r < 0) {
 		perror("inet_pton");
@@ -383,6 +387,7 @@ _connect(void *p) {
 	connected_socket(ss, connfd);
 
 done:
+	free(cmd->ip);
 	free(cmd);
 	free(p);
 	return NULL;
@@ -394,12 +399,18 @@ do_cmd_connect(struct socket_server *ss, struct socket_cmd_connect *cmd) {
 
 	struct _connect_param *p = malloc(sizeof(*p));
 	p->ss  = ss;
-	p->cmd = cmd;
+	p->cmd = malloc(sizeof(*cmd));
+	memcpy(p->cmd, cmd, sizeof(*cmd));
+	p->cmd->ip  = malloc(cmd->ip_len);
+	memcpy(p->cmd->ip, cmd->ip, cmd->ip_len);
+	p->cmd->ip_len = cmd->ip_len;
 
 	// start one pthread to connect 
 	pthread_t pid;
 	pthread_create(&pid, NULL, _connect, p);
 
+	free(cmd->ip);
+	free(cmd);
 	return 0;
 }
 
@@ -417,11 +428,6 @@ do_cmd_connected(struct socket_server *ss, struct socket_cmd_connected *cmd) {
 	return 0;
 }
 
-struct socket_cmd_forward {
-	int id; 	// to socket id
-	int msg_len;
-	char *msg;
-};
 
 int 
 write_msg(struct socket_server *ss, struct socket *s, char *msg, int msg_len) {
@@ -486,11 +492,9 @@ write_appendbuffer(struct socket_server *ss, struct socket *s) {
 			switch(errno) {
 			case EAGAIN:
 				{
-					char* old_buf = s->buf;
-					s->buf = malloc(s->buf_len-count);
+					memcpy(s->buf, s->buf+count, s->buf_len-count);
+					s->buf = realloc(s->buf, s->buf_len-count);
 					s->buf_len -= count;
-					memcpy(s->buf, old_buf+count, s->buf_len);
-					free(s->buf);
 					return 0;
 				}break;
 			case EINTR:
@@ -520,6 +524,12 @@ error:
 	return -1;
 }
 
+struct socket_cmd_forward {
+	int id; 	// to socket id
+	int msg_len;
+	char *msg;
+};
+
 int
 do_cmd_forward(struct socket_server *ss, struct socket_cmd_forward *cmd) {
 	int r;
@@ -536,7 +546,30 @@ do_cmd_forward(struct socket_server *ss, struct socket_cmd_forward *cmd) {
 	r = write_msg(ss, s, msg, msg_len);
 
 done:
-	free(msg);
+	free(cmd->msg);
+	free(cmd);
+	return r;
+}
+
+struct socket_cmd_close {
+	int id;
+};
+
+int 
+do_cmd_close(struct socket_server *ss, struct socket_cmd_close *cmd) {
+	printf("do_cmd_close id=%d\n", cmd->id);
+	int r;
+	int id = cmd->id;
+
+	struct socket *s = _server_getsocket(ss, id);
+	if (s == NULL) {
+		goto done;
+	}
+
+	r = _server_delfd(ss, s);
+
+done:
+	free(cmd);
 	return r;
 }
 
@@ -569,9 +602,9 @@ ctl_cmd(struct socket_server *ss) {
 	block_read(ss->read_fd, &cmd, sizeof(cmd));
 
 	switch(type) {
-	case 'A':
+	case 'L':
 		{
-			do_cmd_accept(ss, cmd);
+			do_cmd_listen(ss, cmd);
 		}break;
 	case 'P':
 		{
@@ -584,6 +617,10 @@ ctl_cmd(struct socket_server *ss) {
 	case 'F':
 		{
 			do_cmd_forward(ss, cmd);
+		}break;
+	case 'S':
+		{
+			do_cmd_close(ss, cmd);
 		}break;
 	}
 
@@ -673,7 +710,7 @@ socket_server_poll(struct socket_server *ss) {
 
 void
 listen_socket(struct socket_server *ss, int port) {
-	uint8_t d = 'A';
+	uint8_t d = 'L';
 	struct socket_cmd_accept *cmd = malloc(sizeof(*cmd));
 	cmd->port = port;	
 
@@ -718,6 +755,18 @@ write_socket(socket_server *ss, int id, char *msg, int msg_len) {
 	cmd->msg = malloc(msg_len);
 	memcpy(cmd->msg, msg, msg_len);
 	cmd->msg_len = msg_len;
+
+	pthread_mutex_lock(&ss->cmd_lock);
+	write(ss->write_fd, &d, sizeof(d));
+	write(ss->write_fd, &cmd, sizeof(cmd));
+	pthread_mutex_unlock(&ss->cmd_lock);
+}
+
+void
+close_socket(socket_server *ss, int id) {
+	uint8_t d = 'S';
+	struct socket_cmd_close *cmd = malloc(sizeof(*cmd));
+	cmd->id = id;
 
 	pthread_mutex_lock(&ss->cmd_lock);
 	write(ss->write_fd, &d, sizeof(d));

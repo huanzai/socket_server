@@ -39,7 +39,11 @@ _worker(void *p) {
 
 		// deal msg
 		struct socket_msg_data *msg = q->msg;
-		write_socket(ss, msg->id, "Iam HuanZai", sizeof("Iam HuanZai"));
+		if (!strncmp(msg->buf, "close", msg->buf_len)) {
+			close_socket(ss, msg->id);
+		} else {
+			write_socket(ss, msg->id, "Iam HuanZai", sizeof("Iam HuanZai"));
+		}
 		
 		pthread_mutex_unlock(&lock);
 	}
@@ -53,6 +57,9 @@ void recv_msg(struct socket_msg_data *msg) {
 
 	struct socket_msg_data *nmsg = malloc(sizeof(*nmsg));
 	memcpy(nmsg, msg, sizeof(*nmsg));
+	nmsg->buf = malloc(msg->buf_len);
+	memcpy(nmsg->buf, msg->buf, msg->buf_len);
+	nmsg->buf_len = msg->buf_len;
 
 	struct _mq *q = malloc(sizeof(*q));
 	q->msg = nmsg;
@@ -82,7 +89,6 @@ int
 main(void) {
 	int i;
 	pthread_t pid[2];
-
 
 	socket_server *ss = socket_server_create(recv_msg);
 
