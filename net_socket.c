@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <assert.h>
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <sys/errno.h>
@@ -221,6 +222,7 @@ struct socket_cmd_accept {
 	int port;
 };
 
+#define HASH_ID(id) (id%ss->sk_cap)
 int 
 reserve_id(struct socket_server *ss) {
 	return ss->atinc_id++;
@@ -228,18 +230,13 @@ reserve_id(struct socket_server *ss) {
 
 struct socket *
 _server_getsocket(struct socket_server *ss, int id) {
-	int i;
-	for (i = 0; i < ss->sk_cap; i++) {
-		struct socket *s = ss->sk[i];
-		if (s == NULL) continue;
-		if (s->id == id) return s;
-	}
-	return NULL;
+	struct socket *s = ss->sk[HASH_ID(id)];
+	return s;
 }
 
 int
 _server_addfd(struct socket_server *ss, int fd, int type) {
-	int i,r;
+	int r;
 
 	struct socket *s = malloc(sizeof(*s));
 	memset(s, 0, sizeof(*s));
@@ -250,9 +247,7 @@ _server_addfd(struct socket_server *ss, int fd, int type) {
 		return r;
 	}
 
-	s->id   = reserve_id(ss);
-	s->fd   = fd;
-	s->type = type;
+	
 	if (ss->sk_use == ss->sk_cap) {
 		ss->sk_cap *= 2;
 		ss->sk = realloc(ss->sk, ss->sk_cap * sizeof(ss->sk));
@@ -260,11 +255,29 @@ _server_addfd(struct socket_server *ss, int fd, int type) {
 			perror("realloc");
 			exit(1);
 		}
-		ss->sk[ss->sk_use++] = s;
+		for (;;) {
+			int id = reserve_id(ss);
+			struct socket *os = ss->sk[HASH_ID(id)];
+			if (os == NULL) {
+				s->id   = id;
+				s->fd   = fd;
+				s->type = type;
+
+				ss->sk[HASH_ID(id)] = s;
+				ss->sk_use++;
+				break;
+			}
+		}
 	} else {
-		for (i = 0; i < ss->sk_cap; i++) {
-			if (ss->sk[i] == NULL) {
-				ss->sk[i] = s;
+		for (;;) {
+			int id = reserve_id(ss);
+			struct socket *os = ss->sk[HASH_ID(id)];
+			if (os == NULL) {
+				s->id   = id;
+				s->fd   = fd;
+				s->type = type;
+
+				ss->sk[HASH_ID(id)] = s;
 				ss->sk_use++;
 				break;
 			}
@@ -278,19 +291,15 @@ _server_addfd(struct socket_server *ss, int fd, int type) {
 
 int
 _server_delfd(struct socket_server *ss, struct socket *s) {
-	int i;
-	for (i = 0; i < ss->sk_cap; i++) {
-		struct socket *st = ss->sk[i];
-		if (s->id == st->id) {
-			ss->sk_use--;
-			ss->sk[i] = NULL;
-			shutdown(s->fd, SHUT_RDWR);
-			sp_del(ss->efd, s->fd);
-			free(s->buf);
-			free(s);
-			break;
-		}
-	}
+	assert(s);
+
+	ss->sk[HASH_ID(s->id)] = NULL;
+	ss->sk_use--;
+	sp_del(ss->efd, s->fd);
+	shutdown(s->fd, SHUT_RDWR);
+	free(s->buf);
+	free(s);
+
 	return 0;
 }
 
