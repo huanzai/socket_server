@@ -43,7 +43,8 @@ struct socket_server {
 };
 
 int _server_delfd(struct socket_server *ss, struct socket *s);
-
+int _server_addfd(struct socket_server *ss, int fd, int type);
+	
 struct socket_server*
 _server_create() {
 	int r,i;
@@ -133,7 +134,7 @@ set_nonblock(int fd) {
 }
 
 int
-report_accept(int fd, struct socket_result *result) {
+report_accept(struct socket_server *ss, int fd, struct socket_result *result) {
 	int r;
 	struct sockaddr_in addr;
 	socklen_t addr_len = sizeof(addr);
@@ -153,6 +154,8 @@ report_accept(int fd, struct socket_result *result) {
 
 	result->data.accept_msg.fd   = r;
 	result->data.accept_msg.addr = addr;
+
+	_server_addfd(ss, r, SOCKET_TYPE_LISTEN);
 	
 	return SOCKET_MSG_ACCEPT;
 }
@@ -168,10 +171,7 @@ report_data(struct socket_server *ss, struct socket *s, struct socket_result *re
 			switch(errno) {
 			case EAGAIN:
 				{
-					result->data.data_msg.id = s->id;
-					result->data.data_msg.buf= msg;
-					result->data.data_msg.buf_len = count;
-					return SOCKET_MSG_DATA;
+					goto done;
 				}break;
 			case EINTR:
 				{
@@ -184,13 +184,22 @@ report_data(struct socket_server *ss, struct socket *s, struct socket_result *re
 				};
 			}
 		} else if (n == 0) {
-			goto error;
+			if (count != 0) {
+				goto done;
+			} else {
+				goto error;
+			}
 		}
 		msg = realloc(msg, count+n);
 		memcpy(msg+count, buf, n);
 		count += n;
 	}
-	return 0;
+
+done:
+	result->data.data_msg.id = s->id;
+	result->data.data_msg.buf= msg;
+	result->data.data_msg.buf_len = count;
+	return SOCKET_MSG_DATA;
 
 error:
 	_server_delfd(ss, s);
@@ -578,9 +587,20 @@ block_read(int fd, void *buf, int size) {
 	for (;;) {
 		n = read(fd, buf+count, size-count);
 		if (n < 0) {
-			return -1;
+			switch(errno) {
+			case EINTR:
+				{
+					continue;
+				}break;
+			default:
+				{
+					perror("read pipe");
+					exit(1);
+				}break;
+			}
 		} else if (n == 0) {
-			return -1;
+			printf("read pipe n == 0\n");
+			exit(1);
 		} else {
 			count += n;
 			if (count == size) {
@@ -662,7 +682,7 @@ wait_msg(struct socket_server *ss, struct socket_result *result) {
 		switch(s->type) {
 		case SOCKET_TYPE_ACCEPT:
 			{
-				return report_accept(s->fd, result);	
+				return report_accept(ss, s->fd, result);	
 			}break;
 		default:
 			{
@@ -676,6 +696,8 @@ wait_msg(struct socket_server *ss, struct socket_result *result) {
 		}
 	}
 }
+
+//-------------------------------The Interface---------------------------------
 
 struct socket_server*
 socket_server_create(msg_func f) {
@@ -697,7 +719,6 @@ socket_server_poll(struct socket_server *ss) {
 			}break;
 		case SOCKET_MSG_ACCEPT:
 			{
-				_server_addfd(ss, result.data.accept_msg.fd, SOCKET_TYPE_LISTEN);
 			};
 		default:
 			{
