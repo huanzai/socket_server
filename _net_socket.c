@@ -538,6 +538,8 @@ struct socket_cmd_forward {
 	char *msg;
 };
 
+#define MAX_WAITWRITEBUF_LEN 5242880 // 5 * 1024 * 1024
+
 int
 do_cmd_forward(struct socket_server *ss, struct socket_cmd_forward *cmd) {
 	int r;
@@ -552,6 +554,9 @@ do_cmd_forward(struct socket_server *ss, struct socket_cmd_forward *cmd) {
 	}
 
 	r = write_msg(ss, s, msg, msg_len);
+	if (s->buf_len > MAX_WAITWRITEBUF_LEN) {
+		_server_delfd(ss, s);
+	}
 
 done:
 	free(cmd->msg);
