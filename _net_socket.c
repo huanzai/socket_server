@@ -309,6 +309,12 @@ do_cmd_listen(struct socket_server *ss, struct socket_cmd_accept *cmd, struct so
 		perror("socket");
 		exit(1);
 	}
+	int reuse = 1;
+	r = setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+	if (r < 0) {
+		perror("setsockopt REUSEADDR");
+		exit(1);
+	}
 	struct sockaddr_in addr;
 	addr.sin_family = AF_INET;
 	addr.sin_addr.s_addr = htonl(INADDR_ANY);
