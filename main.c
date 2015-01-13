@@ -68,6 +68,8 @@ _worker(void *p) {
 					inet_ntop(AF_INET, &accept->addr.sin_addr, addr, sizeof(addr));
 					printf("accept_addr\t:%s:%d\n", addr, ntohs(accept->addr.sin_port));
 				}
+
+				free(accept);
 			}break;
 		case SOCKET_MSG_CONNECT:
 			{
@@ -75,6 +77,8 @@ _worker(void *p) {
 				{
 					printf("connect_id:%d\n", connect->id);
 				}
+
+				free(connect);
 			}break;
 		case SOCKET_MSG_CLOSE:
 			{
@@ -82,6 +86,8 @@ _worker(void *p) {
 				{
 					printf("close_id:%d\n", close->id);
 				}
+
+				free(close);
 			}break;
 		}
 		
