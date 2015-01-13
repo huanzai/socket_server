@@ -22,11 +22,6 @@
 #define SOCKET_TYPE_CONNECT 2
 #define SOCKET_TYPE_LISTEN 3
 
-#define SOCKET_MSG_ACCEPT 1
-#define SOCKET_MSG_CONNECT 2
-#define SOCKET_MSG_DATA 3
-#define SOCKET_MSG_CLOSE 4
-
 struct socket_server {
 	int efd;
 	int read_fd;
