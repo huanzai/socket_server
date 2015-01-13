@@ -5,9 +5,11 @@
 #include <unistd.h>
 #include <stdlib.h>
 #include <string.h>
+#include <arpa/inet.h>
 
 struct _mq {
-	struct socket_msg_data *msg;
+	int msg_type;
+	void*msg;
 	struct _mq* next;
 };
 
@@ -38,11 +40,49 @@ _worker(void *p) {
 		g_mq.msg = q->next;
 
 		// deal msg
-		struct socket_msg_data *msg = q->msg;
-		if (!strncmp(msg->buf, "close", msg->buf_len)) {
-			close_socket(ss, msg->id);
-		} else {
-			write_socket(ss, msg->id, "Iam HuanZai", sizeof("Iam HuanZai"));
+		switch(q->msg_type) {
+		case SOCKET_MSG_DATA:
+			{
+				struct socket_msg_data *msg = q->msg;
+				{
+					printf("data_id\t\t:%d\n", msg->id);
+					printf("data_buf\t:%s\n", msg->buf);
+					printf("data_buf_len\t:%d\n", msg->buf_len);
+				}
+
+				if (!strncmp(msg->buf, "close", msg->buf_len)) {
+					close_socket(ss, msg->id);
+				} else {
+					write_socket(ss, msg->id, "Iam HuanZai", sizeof("Iam HuanZai"));
+				}
+				
+				free(msg->buf);
+				free(msg);
+			}break;
+		case SOCKET_MSG_ACCEPT:
+			{
+				struct socket_msg_accept *accept = q->msg;
+				{
+					printf("accept_id\t:%d\n", accept->id);
+					char addr[1024]={0};
+					inet_ntop(AF_INET, &accept->addr.sin_addr, addr, sizeof(addr));
+					printf("accept_addr\t:%s:%d\n", addr, ntohs(accept->addr.sin_port));
+				}
+			}break;
+		case SOCKET_MSG_CONNECT:
+			{
+				struct socket_msg_connect *connect = q->msg;
+				{
+					printf("connect_id:%d\n", connect->id);
+				}
+			}break;
+		case SOCKET_MSG_CLOSE:
+			{
+				struct socket_msg_close *close = q->msg;
+				{
+					printf("close_id:%d\n", close->id);
+				}
+			}break;
 		}
 		
 		pthread_mutex_unlock(&lock);
@@ -50,19 +90,13 @@ _worker(void *p) {
 	return NULL;
 }
 
-void recv_msg(struct socket_msg_data *msg) {
-	printf("msg.id=%d\n", msg->id);
-	printf("msg.buf=%s\n", msg->buf);
-	printf("msg.len=%d\n", msg->buf_len);
-
-	struct socket_msg_data *nmsg = malloc(sizeof(*nmsg));
-	memcpy(nmsg, msg, sizeof(*nmsg));
-	nmsg->buf = malloc(msg->buf_len);
-	memcpy(nmsg->buf, msg->buf, msg->buf_len);
-	nmsg->buf_len = msg->buf_len;
+void recv_msg(int type, void*msg, int msg_len) {
+	void *nmsg = malloc(msg_len);
+	memcpy(nmsg, msg, msg_len);
 
 	struct _mq *q = malloc(sizeof(*q));
 	q->msg = nmsg;
+	q->msg_type = type;
 	q->next= NULL;
 	
 	pthread_mutex_lock(&lock);

@@ -25,6 +25,7 @@
 #define SOCKET_MSG_ACCEPT 1
 #define SOCKET_MSG_CONNECT 2
 #define SOCKET_MSG_DATA 3
+#define SOCKET_MSG_CLOSE 4
 
 struct socket_server {
 	int efd;
@@ -97,20 +98,11 @@ _server_create() {
 	return ss;
 }
 
-
-struct socket_msg_accept {
-	int fd;
-	struct sockaddr_in addr;
-};
-
-struct socket_msg_connect {
-
-};
-
 typedef union socket_msg {
 	struct socket_msg_accept  accept_msg;
 	struct socket_msg_connect connect_msg;
 	struct socket_msg_data    data_msg;
+	struct socket_msg_close   close_msg;
 } socket_msg_t;
 
 struct socket_result {
@@ -135,7 +127,7 @@ set_nonblock(int fd) {
 
 int
 report_accept(struct socket_server *ss, int fd, struct socket_result *result) {
-	int r;
+	int r,id;
 	struct sockaddr_in addr;
 	socklen_t addr_len = sizeof(addr);
 	r = accept(fd, (struct sockaddr*)&addr, &addr_len);
@@ -152,10 +144,10 @@ report_accept(struct socket_server *ss, int fd, struct socket_result *result) {
 
 	set_nonblock(r);
 
-	result->data.accept_msg.fd   = r;
-	result->data.accept_msg.addr = addr;
+	id = _server_addfd(ss, r, SOCKET_TYPE_LISTEN);
 
-	_server_addfd(ss, r, SOCKET_TYPE_LISTEN);
+	result->data.accept_msg.id   = id;
+	result->data.accept_msg.addr = addr;
 	
 	return SOCKET_MSG_ACCEPT;
 }
@@ -202,9 +194,10 @@ done:
 	return SOCKET_MSG_DATA;
 
 error:
+	result->data.close_msg.id = s->id;
 	_server_delfd(ss, s);
 	free(msg);
-	return -1;
+	return SOCKET_MSG_CLOSE;
 }
 
 int 
@@ -294,7 +287,7 @@ _server_addfd(struct socket_server *ss, int fd, int type) {
 
 	printf("epoll_add socket:%d\n", fd);
 
-	return 0;
+	return s->id;
 }
 
 int
@@ -312,7 +305,7 @@ _server_delfd(struct socket_server *ss, struct socket *s) {
 }
 
 int
-do_cmd_listen(struct socket_server *ss, struct socket_cmd_accept *cmd) {
+do_cmd_listen(struct socket_server *ss, struct socket_cmd_accept *cmd, struct socket_result *result) {
 	printf("do_cmd_listen port:%d\n", cmd->port);	
 
 	int r, sockfd;
@@ -402,7 +395,7 @@ done:
 }
 
 int 
-do_cmd_connect(struct socket_server *ss, struct socket_cmd_connect *cmd) {
+do_cmd_connect(struct socket_server *ss, struct socket_cmd_connect *cmd, struct socket_result *result) {
 	printf("do_cmd_connect %s:%d\n", cmd->ip, cmd->port);
 
 	struct _connect_param *p = malloc(sizeof(*p));
@@ -419,7 +412,7 @@ do_cmd_connect(struct socket_server *ss, struct socket_cmd_connect *cmd) {
 
 	free(cmd->ip);
 	free(cmd);
-	return 0;
+	return -1;
 }
 
 struct socket_cmd_connected {
@@ -427,13 +420,20 @@ struct socket_cmd_connected {
 };
 
 int 
-do_cmd_connected(struct socket_server *ss, struct socket_cmd_connected *cmd) {
+do_cmd_connected(struct socket_server *ss, struct socket_cmd_connected *cmd, struct socket_result *result) {
 	printf("do_cmd_connected %d\n", cmd->fd);
+	int id;
 
-	_server_addfd(ss, cmd->fd, SOCKET_TYPE_CONNECT);
+	id = _server_addfd(ss, cmd->fd, SOCKET_TYPE_CONNECT);
+	struct socket *s = _server_getsocket(ss, id);
+	if (NULL == s) {
+		return -1;
+	}
 
+	result->data.connect_msg.id = id;
+	
 	free(cmd);
-	return 0;
+	return SOCKET_MSG_CONNECT;
 }
 
 
@@ -481,7 +481,6 @@ write_msg(struct socket_server *ss, struct socket *s, char *msg, int msg_len) {
 	return 0;
 
 error:
-	_server_delfd(ss, s);
 	return -1;
 }
 
@@ -528,7 +527,6 @@ write_appendbuffer(struct socket_server *ss, struct socket *s) {
 	return 0;
 
 error:
-	_server_delfd(ss, s);
 	return -1;
 }
 
@@ -541,7 +539,7 @@ struct socket_cmd_forward {
 #define MAX_WAITWRITEBUF_LEN 5242880 // 5 * 1024 * 1024
 
 int
-do_cmd_forward(struct socket_server *ss, struct socket_cmd_forward *cmd) {
+do_cmd_forward(struct socket_server *ss, struct socket_cmd_forward *cmd, struct socket_result *result) {
 	int r;
 	int id      = cmd->id;
 	int msg_len = cmd->msg_len;
@@ -549,19 +547,29 @@ do_cmd_forward(struct socket_server *ss, struct socket_cmd_forward *cmd) {
 
 	struct socket *s = _server_getsocket(ss, id);
 	if (s == NULL) {
-		r = 0;
 		goto done;
 	}
 
 	r = write_msg(ss, s, msg, msg_len);
+	if (r < 0) {
+		goto del;
+	}
 	if (s->buf_len > MAX_WAITWRITEBUF_LEN) {
-		_server_delfd(ss, s);
+		goto del;
 	}
 
 done:
 	free(cmd->msg);
 	free(cmd);
 	return r;
+
+del:
+	_server_delfd(ss, s);
+	result->data.close_msg.id = id;
+
+	free(cmd->msg);
+	free(cmd);
+	return SOCKET_MSG_CLOSE;
 }
 
 struct socket_cmd_close {
@@ -569,21 +577,25 @@ struct socket_cmd_close {
 };
 
 int 
-do_cmd_close(struct socket_server *ss, struct socket_cmd_close *cmd) {
+do_cmd_close(struct socket_server *ss, struct socket_cmd_close *cmd, struct socket_result *result) {
 	printf("do_cmd_close id=%d\n", cmd->id);
-	int r;
 	int id = cmd->id;
 
 	struct socket *s = _server_getsocket(ss, id);
 	if (s == NULL) {
-		goto done;
+		goto error;
 	}
 
-	r = _server_delfd(ss, s);
+	_server_delfd(ss, s);
 
-done:
+	result->data.close_msg.id = id;
+
 	free(cmd);
-	return r;
+	return SOCKET_MSG_CLOSE;
+
+error:
+	free(cmd);
+	return -1;
 }
 
 int
@@ -618,7 +630,7 @@ block_read(int fd, void *buf, int size) {
 }
 
 int
-ctl_cmd(struct socket_server *ss) {
+ctl_cmd(struct socket_server *ss, struct socket_result *result) {
 	uint8_t type;
 	block_read(ss->read_fd, &type, sizeof(type));
 
@@ -628,23 +640,23 @@ ctl_cmd(struct socket_server *ss) {
 	switch(type) {
 	case 'L':
 		{
-			do_cmd_listen(ss, cmd);
+			return do_cmd_listen(ss, cmd, result);
 		}break;
 	case 'P':
 		{
-			do_cmd_connect(ss, cmd);
+			return do_cmd_connect(ss, cmd, result);
 		}break;
 	case 'C':
 		{
-			do_cmd_connected(ss, cmd);
+			return do_cmd_connected(ss, cmd, result);
 		}break;
 	case 'F':
 		{
-			do_cmd_forward(ss, cmd);
+			return do_cmd_forward(ss, cmd, result);
 		}break;
 	case 'S':
 		{
-			do_cmd_close(ss, cmd);
+			return do_cmd_close(ss, cmd, result);
 		}break;
 	}
 
@@ -653,12 +665,12 @@ ctl_cmd(struct socket_server *ss) {
 
 int 
 wait_msg(struct socket_server *ss, struct socket_result *result) {
+	int r;
 	for (;;) {
 		if (ss->check_cmd) {
 			ss->check_cmd = 0;
 			if (has_cmd(ss->read_fd)) {
-				ctl_cmd(ss);
-				continue;
+				return ctl_cmd(ss, result);
 			}
 		}
 		if (ss->ctrl_index == ss->ctrl_size) {
@@ -692,7 +704,12 @@ wait_msg(struct socket_server *ss, struct socket_result *result) {
 		default:
 			{
 				if (e->is_write) {
-					write_appendbuffer(ss, s);
+					r = write_appendbuffer(ss, s);
+					if (r == -1) {
+						result->data.close_msg.id = s->id;
+						_server_delfd(ss, s);
+						return SOCKET_MSG_CLOSE;
+					}
 				}
 				if (e->is_read) {
 					return report_data(ss, s, result);					
@@ -720,11 +737,20 @@ socket_server_poll(struct socket_server *ss) {
 		switch(t) {
 		case SOCKET_MSG_DATA:
 			{
-				ss->msg_push(&result.data.data_msg);
+				ss->msg_push(t, &result.data.data_msg, sizeof(struct socket_msg_data));
+			}break;
+		case SOCKET_MSG_CONNECT:
+			{
+				ss->msg_push(t, &result.data.connect_msg, sizeof(struct socket_msg_connect));
 			}break;
 		case SOCKET_MSG_ACCEPT:
 			{
-			};
+				ss->msg_push(t, &result.data.accept_msg, sizeof(struct socket_msg_accept));
+			}break;
+		case SOCKET_MSG_CLOSE:
+			{
+				ss->msg_push(t, &result.data.close_msg, sizeof(struct socket_msg_close));
+			}break;
 		default:
 			{
 				continue;
