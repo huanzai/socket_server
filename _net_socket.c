@@ -704,6 +704,9 @@ wait_msg(struct socket_server *ss, struct socket_result *result) {
 			}break;
 		default:
 			{
+				if (e->is_read) {
+					return report_data(ss, s, result);					
+				}
 				if (e->is_write) {
 					r = write_appendbuffer(ss, s);
 					if (r == -1) {
@@ -711,9 +714,6 @@ wait_msg(struct socket_server *ss, struct socket_result *result) {
 						_server_delfd(ss, s);
 						return SOCKET_MSG_CLOSE;
 					}
-				}
-				if (e->is_read) {
-					return report_data(ss, s, result);					
 				}
 			}break;
 		}
